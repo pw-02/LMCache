@@ -72,6 +72,10 @@ class EventType(Enum):
     MP_LOOKUP_PREFETCH_START = "mp.lookup_prefetch.start"
     MP_LOOKUP_PREFETCH_END = "mp.lookup_prefetch.end"
 
+    # Remote-L2 admission decision made for a request after token hashing.
+    # Metadata: decision ("use_l2" | "skip_l2"), requested_tokens (int).
+    MP_L2_LOOKUP_DECISION = "mp.l2_lookup.decision"
+
     # Chunk hash logging events
     MP_LOOKUP = "mp.lookup"
 

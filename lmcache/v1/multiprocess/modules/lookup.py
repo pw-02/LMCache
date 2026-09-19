@@ -255,6 +255,19 @@ class LookupModule:
         # trailing tokens are intentionally excluded — they cannot hit at
         # chunk granularity.
         requested_tokens = len(chunk_hashes) * self._ctx.chunk_size
+        use_l2 = self._ctx.storage_manager.should_lookup_l2(requested_tokens)
+        self._ctx.event_bus.publish(
+            Event(
+                event_type=EventType.MP_L2_LOOKUP_DECISION,
+                session_id=key.request_id,
+                metadata={
+                    "decision": "use_l2" if use_l2 else "skip_l2",
+                    "requested_tokens": requested_tokens,
+                    "model_name": model_name,
+                    "cache_salt": key.cache_salt,
+                },
+            )
+        )
 
         # Guard with has_subscribers() to avoid allocating the metadata dict
         # (including dtype/shape list comprehensions) when no subscriber is
@@ -324,6 +337,7 @@ class LookupModule:
                 attn_desc=attn_desc,
             ),
             external_request_id=key.request_id,
+            skip_l2=not use_l2,
         )
         self._register_prefetch_job(
             _PrefetchJob(

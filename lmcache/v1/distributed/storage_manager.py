@@ -43,6 +43,9 @@ from lmcache.v1.distributed.storage_controllers import (
     PrefetchController,
     StoreController,
 )
+from lmcache.v1.distributed.storage_controllers.l2_lookup_policy import (
+    L2LookupDecisionPolicy,
+)
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     create_prefetch_policy,
 )
@@ -69,6 +72,10 @@ class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         self._l1_manager = L1Manager(config.l1_manager_config)
         self._event_bus = get_event_bus()
+        self._l2_lookup_policy = L2LookupDecisionPolicy(
+            name=config.l2_lookup_policy,
+            min_tokens=config.l2_lookup_min_tokens,
+        )
 
         # L1 eviction controller
         self._eviction_controller = L1EvictionController(
@@ -168,6 +175,10 @@ class StorageManager:
         )
 
     # External APIs for serving engine integration code to call
+    def should_lookup_l2(self, requested_tokens: int) -> bool:
+        """Return whether request misses may be fetched from remote L2."""
+        return self._l2_lookup_policy.should_lookup_l2(requested_tokens)
+
     @enable_tracing()
     def reserve_write(
         self,

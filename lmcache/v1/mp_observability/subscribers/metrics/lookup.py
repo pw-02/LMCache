@@ -81,13 +81,38 @@ class LookupMetricsSubscriber(EventSubscriber):
             ),
             unit="tokens",
         )
+        self._l2_decisions = meter.create_counter(
+            "lmcache_mp.l2_lookup_policy_decisions",
+            description=(
+                "Remote-L2 admission decisions, labeled by decision "
+                "(use_l2 or skip_l2)."
+            ),
+            unit="requests",
+        )
+        self._l2_decision_tokens = meter.create_counter(
+            "lmcache_mp.l2_lookup_policy_tokens",
+            description=(
+                "Chunk-aligned request tokens covered by remote-L2 admission "
+                "decisions, labeled by decision (use_l2 or skip_l2)."
+            ),
+            unit="tokens",
+        )
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {
             EventType.MP_LOOKUP_PREFETCH_END: self._on_lookup_prefetch_end,
+            EventType.MP_L2_LOOKUP_DECISION: self._on_l2_lookup_decision,
         }
 
     def _on_lookup_prefetch_end(self, event: Event) -> None:
         attrs = _lookup_attrs(event)
         self._requested_tokens.add(event.metadata["requested_tokens"], attributes=attrs)
         self._hit_tokens.add(event.metadata["hit_tokens"], attributes=attrs)
+
+    def _on_l2_lookup_decision(self, event: Event) -> None:
+        attrs = _lookup_attrs(event)
+        attrs["decision"] = str(event.metadata["decision"])
+        self._l2_decisions.add(1, attributes=attrs)
+        self._l2_decision_tokens.add(
+            int(event.metadata["requested_tokens"]), attributes=attrs
+        )

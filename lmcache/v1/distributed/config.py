@@ -256,6 +256,12 @@ class StorageManagerConfig:
     prefetch_policy: str = "default"
     """ The L2 prefetch policy name. """
 
+    l2_lookup_policy: Literal["always", "never", "min_tokens"] = "always"
+    """ Whether request lookups may consult remote L2 storage. """
+
+    l2_lookup_min_tokens: int = 0
+    """ Minimum chunk-aligned request tokens for the ``min_tokens`` policy. """
+
     prefetch_max_in_flight: int = 8
     """ Maximum number of concurrent prefetch requests. """
 
@@ -302,6 +308,21 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         ValueError: If mutually exclusive L1 tiers are both configured, or
             hybrid L1 is paired with incompatible L2 adapters.
     """
+    if config.l2_lookup_policy not in {"always", "never", "min_tokens"}:
+        raise ValueError(
+            "l2_lookup_policy must be one of: always, never, min_tokens"
+        )
+    if config.l2_lookup_min_tokens < 0:
+        raise ValueError("l2_lookup_min_tokens cannot be negative")
+    if (
+        config.l2_lookup_policy == "min_tokens"
+        and config.l2_lookup_min_tokens <= 0
+    ):
+        raise ValueError(
+            "l2_lookup_min_tokens must be positive when l2_lookup_policy is "
+            "'min_tokens'"
+        )
+
     if (
         config.l1_manager_config.gds_l1_config is not None
         and config.l1_manager_config.memory_config.devdax_path
@@ -523,6 +544,26 @@ def add_storage_manager_args(
         "Default is 'default' (pick the first adapter by index).",
     )
     policy_group.add_argument(
+        "--l2-lookup-policy",
+        choices=("always", "never", "min_tokens"),
+        default="always",
+        help=(
+            "Whether request lookups may consult remote L2 storage. "
+            "'always' preserves the existing behavior, 'never' uses only "
+            "local L1 before recomputing misses, and 'min_tokens' consults "
+            "L2 only for requests meeting --l2-lookup-min-tokens."
+        ),
+    )
+    policy_group.add_argument(
+        "--l2-lookup-min-tokens",
+        type=int,
+        default=0,
+        help=(
+            "Minimum chunk-aligned requested prefix tokens required for an "
+            "L2 lookup when --l2-lookup-policy=min_tokens."
+        ),
+    )
+    policy_group.add_argument(
         "--l2-prefetch-max-in-flight",
         type=int,
         default=8,
@@ -622,6 +663,8 @@ def parse_args_to_config(
         l2_adapter_config=l2_adapter_config,
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
+        l2_lookup_policy=args.l2_lookup_policy,
+        l2_lookup_min_tokens=args.l2_lookup_min_tokens,
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )

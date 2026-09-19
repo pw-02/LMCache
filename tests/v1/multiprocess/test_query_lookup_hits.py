@@ -270,12 +270,32 @@ def _captured_lookup_object_keys(
         num_chunks_in_sw=[-1] * num_groups
     )
     ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
+    ctx.storage_manager.should_lookup_l2.return_value = True
 
     module = LookupModule(ctx)
     module.lookup(_lookup_key(world_size=world_size), tp_size=1)
 
     ctx.storage_manager.submit_prefetch_task.assert_called_once()
     return ctx.storage_manager.submit_prefetch_task.call_args.args[0].keys
+
+
+def test_lookup_passes_policy_decision_to_storage_manager() -> None:
+    ctx = MagicMock()
+    ctx.chunk_size = 256
+    ctx.event_bus.has_subscribers.return_value = False
+    ctx.layout_desc_registry.find.return_value = MagicMock()
+    ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
+    ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
+        num_chunks_in_sw=[-1]
+    )
+    ctx.token_hasher.compute_chunk_hashes.return_value = [b"c0", b"c1"]
+    ctx.storage_manager.should_lookup_l2.return_value = False
+
+    module = LookupModule(ctx)
+    module.lookup(_lookup_key(world_size=1), tp_size=1)
+
+    ctx.storage_manager.should_lookup_l2.assert_called_once_with(512)
+    assert ctx.storage_manager.submit_prefetch_task.call_args.kwargs["skip_l2"] is True
 
 
 def test_lookup_lays_keys_out_chunk_then_group_then_rank():
