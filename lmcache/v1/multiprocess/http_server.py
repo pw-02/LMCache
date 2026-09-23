@@ -44,14 +44,10 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_http_frontend_config,
     parse_args_to_mp_server_config,
 )
-from lmcache.v1.multiprocess.http_api_registry import (
-    HTTPAPIRegistry,
-)
+from lmcache.v1.multiprocess.http_api_registry import HTTPAPIRegistry
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_apis.error_handlers import register_error_handlers
-from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
-    MPRuntimePluginLauncher,
-)
+from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import MPRuntimePluginLauncher
 from lmcache.v1.multiprocess.server import run_cache_server
 
 logger = init_logger(__name__)
@@ -160,11 +156,20 @@ async def lifespan(app: FastAPI):
     app.state.coordinator_client = coordinator_client
     app.state.coordinator_registration_task = coordinator_registration_task
 
+    async def reap_warm_jobs() -> None:
+        while True:
+            await asyncio.sleep(10)
+            app.state.context.prefetch_service.reap()
+
+    warm_reaper = asyncio.create_task(reap_warm_jobs())
     logger.info("LMCache HTTP server initialized")
 
     yield
 
     # Shutdown
+    warm_reaper.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await warm_reaper
     logger.info("Shutting down LMCache HTTP server...")
     coordinator_registration_task = getattr(
         app.state, "coordinator_registration_task", None

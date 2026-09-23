@@ -536,11 +536,13 @@ class L1Manager:
     def finish_write(
         self,
         keys: list[ObjectKey],
+        from_l2: bool = False,
     ) -> dict[ObjectKey, L1Error]:
         """Finish write access for the given keys.
 
         Args:
             keys: The list of object keys to finish write access for.
+            from_l2: True for L2 loads; notify eviction without re-persisting.
 
         Returns:
             A dictionary mapping each object key to an L1Error.
@@ -584,7 +586,10 @@ class L1Manager:
             successful_keys_meta.append(self._object_meta(entry.memory_obj))
 
         for listener in self._registered_listeners:
-            listener.on_l1_keys_write_finished(successful_keys)
+            if from_l2:
+                listener.on_l1_keys_warmed(successful_keys)
+            else:
+                listener.on_l1_keys_write_finished(successful_keys)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_WRITE_FINISHED,

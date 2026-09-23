@@ -44,7 +44,7 @@ class PrefetchRequest:
     model_name: str
     world_size: int
     token_ids: list[int]
-    cache_salt: str = ""
+    cache_namespace: str = ""
     source_tier: Tier = Tier.L2
     target_tier: Tier = Tier.L1
 

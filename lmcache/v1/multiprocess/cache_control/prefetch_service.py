@@ -19,11 +19,7 @@ from lmcache.v1.multiprocess.cache_control.errors import (
     Unavailable,
 )
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
-from lmcache.v1.multiprocess.warm_prefetch import (
-    COMPLETED,
-    UNKNOWN,
-    WarmPrefetchJobs,
-)
+from lmcache.v1.multiprocess.warm_prefetch import COMPLETED, UNKNOWN, WarmPrefetchJobs
 
 # Warm prefetch loads from L2 into L1; other directions are rejected.
 _SOURCE_TIER = Tier.L2
@@ -83,9 +79,12 @@ class PrefetchService:
             raise InvalidRequest(str(exc)) from None
         if not chunks:
             return {"chunks": 0, "status": "noop"}
-        request_id = self._jobs.submit(
-            self._engine.storage_manager, obj_keys, layout_desc
-        )
+        try:
+            request_id = self._jobs.submit(
+                self._engine.storage_manager, obj_keys, layout_desc
+            )
+        except RuntimeError as exc:
+            raise Unavailable(str(exc)) from exc
         return {"request_id": request_id, "chunks": chunks, "status": "submitted"}
 
     def status(self, request_id: str) -> dict[str, object]:
@@ -111,5 +110,10 @@ class PrefetchService:
                 "status": COMPLETED,
                 "found_keys": status.found_keys,
                 "total_keys": status.total_keys,
+                "already_l1_keys": status.already_l1_keys,
             }
         return {"request_id": request_id, "status": status.state}
+
+    def reap(self) -> None:
+        """Reclaim completed, abandoned warm-job bookkeeping after its grace period."""
+        self._jobs.reap(self._engine.storage_manager)

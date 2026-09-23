@@ -456,7 +456,7 @@ class _PrefetchStorageManager:
         self.submit_calls.append({"keys": list(spec.keys), "mode": spec.mode})
         return _PrefetchHandle(len(spec.keys))
 
-    def query_prefetch_status(self, handle) -> _PrefetchBitmap:
+    def query_prefetch_status(self, handle, transfer_stats=None) -> _PrefetchBitmap:
         return _PrefetchBitmap(handle.total_requested_keys)
 
 
@@ -503,7 +503,7 @@ def _prefetch_body(token_ids: list[int], world_size: int = 2, salt: str = "") ->
         "model_name": "m",
         "world_size": world_size,
         "token_ids": token_ids,
-        "cache_salt": salt,
+        "cache_namespace": salt,
     }
 
 
@@ -555,7 +555,7 @@ class TestPrefetchEndpoint:
         )
         assert resp.status_code == 503
 
-    def test_400_on_invalid_cache_salt(self):
+    def test_400_on_invalid_cache_namespace(self):
         client = TestClient(_make_prefetch_app(_ctx(layout=object())))
         resp = client.post(
             "/cache/prefetches", json=_prefetch_body([1, 2, 3, 4], salt="bad@salt")

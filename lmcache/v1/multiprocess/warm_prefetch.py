@@ -17,6 +17,7 @@ it; since nothing is pinned, no L1 is held.
 # Standard
 from dataclasses import dataclass
 import threading
+import time
 import uuid
 
 # First Party
@@ -55,6 +56,7 @@ class WarmStatus:
     state: str
     found_keys: int = 0
     total_keys: int = 0
+    already_l1_keys: int = 0
 
 
 class WarmPrefetchJobs:
@@ -72,6 +74,7 @@ class WarmPrefetchJobs:
         """Initialize an empty table."""
         self._lock = threading.Lock()
         self._jobs: dict[str, PrefetchHandle] = {}
+        self._submitted_at: dict[str, float] = {}
 
     def submit(
         self,
@@ -89,18 +92,21 @@ class WarmPrefetchJobs:
         Returns:
             An opaque request id to pass to :meth:`poll`.
         """
-        handle = storage_manager.submit_prefetch_task(
-            PrefetchRequestSpec(
-                keys=keys,
-                group_layout_descs={0: layout_desc},
-                mode=PrefetchMode.WARM,
-                policy=TrimPolicy.SPARSE,
-            )
-        )
-        request_id = uuid.uuid4().hex
         with self._lock:
+            if len(self._jobs) >= 1024:
+                raise RuntimeError("Warm-prefetch job limit reached")
+            handle = storage_manager.submit_prefetch_task(
+                PrefetchRequestSpec(
+                    keys=keys,
+                    group_layout_descs={0: layout_desc},
+                    mode=PrefetchMode.WARM,
+                    policy=TrimPolicy.SPARSE,
+                )
+            )
+            request_id = uuid.uuid4().hex
             self._jobs[request_id] = handle
-        return request_id
+            self._submitted_at[request_id] = time.monotonic()
+            return request_id
 
     def poll(
         self,
@@ -120,24 +126,42 @@ class WarmPrefetchJobs:
         """
         with self._lock:
             handle = self._jobs.get(request_id)
-        if handle is None:
-            return WarmStatus(state=UNKNOWN)
+            if handle is None:
+                return WarmStatus(state=UNKNOWN)
 
-        found = storage_manager.query_prefetch_status(handle)
-        if found is None:
-            return WarmStatus(state=PENDING)
+            transfer_stats: dict[str, int] = {}
+            found = storage_manager.query_prefetch_status(handle, transfer_stats)
+            if found is None:
+                return WarmStatus(state=PENDING)
 
-        with self._lock:
             self._jobs.pop(request_id, None)
-        found_keys = found.popcount()
-        logger.info(
-            "Warm prefetch %s completed: %d/%d keys loaded into L1",
-            request_id,
-            found_keys,
-            handle.total_requested_keys,
-        )
-        return WarmStatus(
-            state=COMPLETED,
-            found_keys=found_keys,
-            total_keys=handle.total_requested_keys,
-        )
+            self._submitted_at.pop(request_id, None)
+            found_keys = found.popcount()
+            logger.info(
+                "Warm prefetch %s completed: %d/%d keys loaded into L1",
+                request_id,
+                found_keys,
+                handle.total_requested_keys,
+            )
+            return WarmStatus(
+                state=COMPLETED,
+                found_keys=found_keys,
+                total_keys=handle.total_requested_keys,
+                already_l1_keys=transfer_stats.get("already_l1_keys", 0),
+            )
+
+    def reap(self, storage_manager: StorageManager, max_age: float = 330.0) -> None:
+        """Consume completed abandoned jobs after max_age seconds.
+
+        Pending transfers are never cancelled or forgotten; their buffers stay
+        owned by the prefetch controller. The job cap bounds bookkeeping.
+        """
+        now = time.monotonic()
+        with self._lock:
+            expired = [
+                key
+                for key, stamp in self._submitted_at.items()
+                if now - stamp > max_age
+            ]
+        for request_id in expired:
+            self.poll(storage_manager, request_id)

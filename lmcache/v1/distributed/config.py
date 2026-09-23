@@ -253,6 +253,10 @@ class StorageManagerConfig:
     store_policy: str = "default"
     """ The L2 store policy name. """
 
+    l2_store_admission: str = "always"
+    l2_store_min_tokens: int = 0
+    prefix_history_entries: int = 0
+
     prefetch_policy: str = "default"
     """ The L2 prefetch policy name. """
 
@@ -308,16 +312,22 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         ValueError: If mutually exclusive L1 tiers are both configured, or
             hybrid L1 is paired with incompatible L2 adapters.
     """
+    if config.l2_store_admission not in {"always", "never", "min_tokens"}:
+        raise ValueError("Invalid l2_store_admission")
+    if config.l2_store_min_tokens < 0 or (
+        config.l2_store_admission == "min_tokens" and config.l2_store_min_tokens <= 0
+    ):
+        raise ValueError("Invalid l2_store_min_tokens")
+    if not 0 <= config.prefix_history_entries <= 4096:
+        raise ValueError("prefix_history_entries must be between 0 and 4096")
+    if config.store_policy == "skip_l1" and config.l2_store_admission != "always":
+        raise ValueError("skip_l1 requires always persistence admission")
+
     if config.l2_lookup_policy not in {"always", "never", "min_tokens"}:
-        raise ValueError(
-            "l2_lookup_policy must be one of: always, never, min_tokens"
-        )
+        raise ValueError("l2_lookup_policy must be one of: always, never, min_tokens")
     if config.l2_lookup_min_tokens < 0:
         raise ValueError("l2_lookup_min_tokens cannot be negative")
-    if (
-        config.l2_lookup_policy == "min_tokens"
-        and config.l2_lookup_min_tokens <= 0
-    ):
+    if config.l2_lookup_policy == "min_tokens" and config.l2_lookup_min_tokens <= 0:
         raise ValueError(
             "l2_lookup_min_tokens must be positive when l2_lookup_policy is "
             "'min_tokens'"
@@ -526,6 +536,13 @@ def add_storage_manager_args(
         "L2 Policies", "Store and prefetch policy selection for L2 adapters"
     )
     policy_group.add_argument(
+        "--l2-store-admission",
+        default="always",
+        choices=("always", "never", "min_tokens"),
+    )
+    policy_group.add_argument("--l2-store-min-tokens", type=int, default=0)
+    policy_group.add_argument("--prefix-history-entries", type=int, default=0)
+    policy_group.add_argument(
         "--l2-store-policy",
         type=str,
         choices=get_registered_store_policies(),
@@ -662,6 +679,9 @@ def parse_args_to_config(
         eviction_config=eviction_config,
         l2_adapter_config=l2_adapter_config,
         store_policy=args.l2_store_policy,
+        l2_store_admission=getattr(args, "l2_store_admission", "always"),
+        l2_store_min_tokens=getattr(args, "l2_store_min_tokens", 0),
+        prefix_history_entries=getattr(args, "prefix_history_entries", 0),
         prefetch_policy=args.l2_prefetch_policy,
         l2_lookup_policy=args.l2_lookup_policy,
         l2_lookup_min_tokens=args.l2_lookup_min_tokens,

@@ -23,6 +23,7 @@ from http import HTTPStatus
 from typing import Any, Optional
 import asyncio
 import hashlib
+import math
 
 # Third Party
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -104,6 +105,36 @@ async def delete_cache_objects(
 # ---------------------------------------------------------------------------
 
 
+@router.get("/cache/prefix-history", response_model=None)
+async def prefix_history(
+    request: Request, model_name: str = "", world_size: int = 1
+) -> dict[str, object]:
+    """Export recent prefix observations plus current L1 occupancy.
+
+    An observation does not assert Redis residency. Token IDs and cache
+    namespaces are sensitive deployment metadata; do not expose them publicly.
+    """
+    manager = get_context(request).engine.storage_manager
+    result = manager.prefix_history.snapshot()
+    result["persistence_admission"] = manager.persistence_policy.statistics()
+    used, total = manager.get_l1_usage()
+    result.update(l1_used_bytes=used, l1_total_bytes=total)
+    ctx = get_context(request).engine.context
+    desc = ctx.layout_desc_registry.find(model_name, world_size)
+    if desc is not None:
+        attn = ctx.layout_desc_registry.find_attn_desc(model_name, world_size)
+        result["layout"] = {
+            "supported": attn.num_chunks_in_sw == [-1],
+            "chunk_size": ctx.chunk_size,
+            "bytes_per_chunk": world_size
+            * sum(
+                math.prod(shape) * dtype.itemsize
+                for shape, dtype in zip(desc.shapes, desc.dtypes, strict=True)
+            ),
+        }
+    return result
+
+
 @router.post("/cache/prefetches", response_model=None, status_code=202)
 async def submit_prefetch(body: PrefetchRequest, request: Request) -> dict[str, object]:
     """Submit a warm prefetch of a token sequence from L2 into L1.
@@ -111,7 +142,7 @@ async def submit_prefetch(body: PrefetchRequest, request: Request) -> dict[str, 
     Responses:
         202: ``{"request_id", "chunks", "status": "submitted"}``, or
             ``{"chunks": 0, "status": "noop"}`` for a sub-chunk sequence.
-        400: token cap exceeded, invalid ``cache_salt``, or unsupported tiers.
+        400: token cap exceeded, invalid ``cache_namespace``, or unsupported tiers.
         422: body validation.
         503: not initialized, or no layout registered for the model.
     """
@@ -119,7 +150,7 @@ async def submit_prefetch(body: PrefetchRequest, request: Request) -> dict[str, 
         body.model_name,
         body.world_size,
         body.token_ids,
-        body.cache_salt,
+        body.cache_namespace,
         body.source_tier,
         body.target_tier,
     )

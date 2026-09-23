@@ -35,6 +35,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
 )
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
 from lmcache.v1.distributed.quota_manager import QuotaManager
+from lmcache.v1.distributed.prefix_history import PrefixHistory
 from lmcache.v1.distributed.serde import create_serde_processor
 from lmcache.v1.distributed.storage_controllers import (
     L1EvictionController,
@@ -51,6 +52,7 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
+    AdmissionStorePolicy,
     create_store_policy,
 )
 from lmcache.v1.memory_management import MemoryObj
@@ -70,6 +72,8 @@ logger = init_logger(__name__)
 
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
+        self.prefix_history = PrefixHistory(config.prefix_history_entries)
+        self.track_store_admission = config.l2_store_admission == "min_tokens"
         self._l1_manager = L1Manager(config.l1_manager_config)
         self._event_bus = get_event_bus()
         self._l2_lookup_policy = L2LookupDecisionPolicy(
@@ -144,11 +148,17 @@ class StorageManager:
         # Controllers receive the initial set as ordered lists; they key
         # their own copies by ``descriptor.index`` (== adapter_id) and learn
         # of later changes via add_adapter/request_remove_adapter.
+        self.persistence_policy = AdmissionStorePolicy(
+            create_store_policy(config.store_policy),
+            self.prefix_history,
+            config.l2_store_admission,
+            config.l2_store_min_tokens,
+        )
         self._store_controller = StoreController(
             l1_manager=self._l1_manager,
             l2_adapters=list(self._l2_adapters.values()),
             adapter_descriptors=list(self._adapter_descriptors.values()),
-            policy=create_store_policy(config.store_policy),
+            policy=self.persistence_policy,
         )
         self._store_controller.start()
 
@@ -694,6 +704,7 @@ class StorageManager:
     def query_prefetch_status(
         self,
         handle: PrefetchHandle,
+        transfer_stats: dict[str, int] | None = None,
     ) -> Bitmap | None:
         """
         Query the status of the prefetch task.
@@ -708,9 +719,14 @@ class StorageManager:
         """
         l2_r: Bitmap | None = None
         if handle.prefetch_request_id != -1:
-            l2_r = self._prefetch_controller.query_prefetch_result(
-                handle.prefetch_request_id
-            )
+            if transfer_stats is None:
+                l2_r = self._prefetch_controller.query_prefetch_result(
+                    handle.prefetch_request_id
+                )
+            else:
+                l2_r = self._prefetch_controller.query_prefetch_result(
+                    handle.prefetch_request_id, transfer_stats
+                )
             if l2_r is None:
                 return None
 

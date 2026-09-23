@@ -63,7 +63,7 @@ class _FakeStorageManager:
         }
         return _FakeHandle(self._total)
 
-    def query_prefetch_status(self, handle):
+    def query_prefetch_status(self, handle, transfer_stats=None):
         if self._polls < self.delay_polls:
             self._polls += 1
             return None

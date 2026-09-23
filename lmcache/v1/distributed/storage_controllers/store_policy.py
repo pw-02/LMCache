@@ -10,6 +10,7 @@ The store policy makes two decisions after data is written to L1:
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import threading
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -17,6 +18,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     get_type_name_for_config,
 )
+from lmcache.v1.distributed.prefix_history import PrefixHistory
 
 
 @dataclass(frozen=True)
@@ -211,3 +213,65 @@ class BufferOnlyStorePolicy(DefaultStorePolicy):
 
 register_store_policy("default", DefaultStorePolicy)
 register_store_policy("skip_l1", BufferOnlyStorePolicy)
+
+
+class AdmissionStorePolicy(StorePolicy):
+    """Filter completed L1 writes before delegating placement/deletion.
+
+    Args:
+        delegate: Existing placement policy.
+        prefix_history: Recent prefix observations providing per-key length hints.
+        mode: always, never, or min_tokens, independent of retrieval admission.
+        minimum: Inclusive request-token floor for min_tokens.
+    """
+
+    def __init__(
+        self,
+        delegate: StorePolicy,
+        prefix_history: "PrefixHistory",
+        mode: str = "always",
+        minimum: int = 0,
+    ) -> None:
+        if mode not in {"always", "never", "min_tokens"}:
+            raise ValueError("Unknown persistence admission policy")
+        if minimum < 0 or (mode == "min_tokens" and minimum <= 0):
+            raise ValueError("Invalid persistence token threshold")
+        self.delegate = delegate
+        self.prefix_history = prefix_history
+        self.mode = mode
+        self.minimum = minimum
+        self._decision_lock = threading.Lock()
+        self._admitted_keys = 0
+        self._skipped_keys = 0
+
+    def select_store_targets(
+        self, keys: list[ObjectKey], adapters: list[AdapterDescriptor]
+    ) -> dict[int, list[ObjectKey]]:
+        """Return placement targets only for admitted keys; retain skipped L1 data."""
+        admitted = (
+            keys
+            if self.mode == "always"
+            else [
+                key
+                for key in keys
+                if self.mode == "min_tokens"
+                and self.prefix_history.admits_persistence(key, self.minimum)
+            ]
+        )
+        with self._decision_lock:
+            self._admitted_keys += len(admitted)
+            self._skipped_keys += len(keys) - len(admitted)
+        return self.delegate.select_store_targets(admitted, adapters)
+
+    def statistics(self) -> dict[str, int | str]:
+        """Return cumulative logical key decisions (not completed Redis writes)."""
+        with self._decision_lock:
+            return {
+                "mode": self.mode,
+                "admitted_keys": self._admitted_keys,
+                "skipped_keys": self._skipped_keys,
+            }
+
+    def select_l1_deletions(self, keys: list[ObjectKey]) -> list[ObjectKey]:
+        """Delegate deletion for successfully persisted keys only."""
+        return self.delegate.select_l1_deletions(keys)

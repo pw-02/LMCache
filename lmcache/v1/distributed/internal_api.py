@@ -76,6 +76,14 @@ class L1ManagerListener(EventListener):
         """
         pass
 
+    def on_l1_keys_warmed(self, keys: list[ObjectKey]) -> None:
+        """Notify L2-origin writes; default preserves ordinary listener behavior.
+
+        Store listeners override this hook to avoid writing warmed KV back to
+        L2. Eviction listeners still learn that keys are now resident in L1.
+        """
+        self.on_l1_keys_write_finished(keys)
+
     @abstractmethod
     def on_l1_keys_write_finished(self, keys: list[ObjectKey]):
         """

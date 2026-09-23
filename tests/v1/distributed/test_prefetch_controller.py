@@ -1887,3 +1887,50 @@ class TestSlidingWindowClaims:
 
         l1_manager.finish_read(keys[:4])
         l1_manager.finish_write([keys[4]])
+
+
+def test_warm_reports_remote_bytes_without_repersistence(l1_manager: L1Manager) -> None:
+    """Warm an L1/L2 mix; only genuine remote loads count and no store is queued."""
+    # First Party
+    from lmcache.v1.distributed.storage_controllers.store_controller import (
+        StoreListener,
+    )
+
+    adapter = make_adapter()
+    layout = make_layout()
+    keys = [make_object_key(i) for i in range(3)]
+    store_keys_in_l2(adapter, keys, layout)
+    l1_manager.reserve_write(
+        [keys[0]], is_temporary=[False], layout_desc=layout, mode="new"
+    )
+    l1_manager.finish_write([keys[0]])
+    listener = StoreListener()
+    l1_manager.register_listener(listener)
+    ctrl = PrefetchController(
+        l1_manager=l1_manager,
+        l2_adapters=[adapter],
+        adapter_descriptors=[make_descriptor(0)],
+        policy=DefaultPrefetchPolicy(),
+    )
+    ctrl.start()
+    try:
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(
+                keys, {0: layout}, mode=PrefetchMode.WARM, policy=TrimPolicy.SPARSE
+            )
+        )
+        assert ctrl.wait_prefetch_result(req_id, 5)
+        stats: dict[str, int] = {}
+        result = ctrl.query_prefetch_result(req_id, stats)
+        assert result is not None and result.popcount() == 3
+        assert stats == {"already_l1_keys": 1, "remote_loaded_keys": 2}
+        assert listener.pending_count() == 0
+        assert all(
+            error == L1Error.SUCCESS
+            for error, _ in l1_manager.reserve_read(keys).values()
+        )
+        l1_manager.finish_read(keys)
+    finally:
+        ctrl.stop()
+        adapter.close()
+        listener.close()

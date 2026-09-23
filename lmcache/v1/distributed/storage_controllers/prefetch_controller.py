@@ -76,19 +76,12 @@ from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
     AddAdapterOp,
     RemoveAdapterOp,
 )
-from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
-    PrefetchPolicy,
-)
-from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
-)
+from lmcache.v1.distributed.storage_controllers.prefetch_policy import PrefetchPolicy
+from lmcache.v1.distributed.storage_controllers.store_policy import AdapterDescriptor
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
-from lmcache.v1.platform import (
-    consume_fd,
-    create_event_notifier,
-)
+from lmcache.v1.platform import consume_fd, create_event_notifier
 
 if TYPE_CHECKING:
     # First Party
@@ -330,6 +323,7 @@ class PrefetchController(StorageControllerInterface):
         self._prefetch_results_lock = threading.Lock()
         self._prefetch_results_cv = threading.Condition(self._prefetch_results_lock)
         self._completed_results: dict[PrefetchRequestId, Bitmap] = {}
+        self._completed_transfer_stats: dict[PrefetchRequestId, dict[str, int]] = {}
 
         # Map eventfds to adapter indices for quick lookup in poll.
         # Relies on the L2AdapterInterface contract that every adapter
@@ -460,7 +454,11 @@ class PrefetchController(StorageControllerInterface):
         with self._lookup_results_lock:
             return self._completed_lookups.get(request_id, None)
 
-    def query_prefetch_result(self, request_id: PrefetchRequestId) -> Bitmap | None:
+    def query_prefetch_result(
+        self,
+        request_id: PrefetchRequestId,
+        transfer_stats: dict[str, int] | None = None,
+    ) -> Bitmap | None:
         """
         Query the result of a prefetch request.
 
@@ -482,6 +480,10 @@ class PrefetchController(StorageControllerInterface):
         """
         with self._prefetch_results_lock:
             result = self._completed_results.pop(request_id, None)
+            if result is not None:
+                stats = self._completed_transfer_stats.pop(request_id, {})
+                if transfer_stats is not None:
+                    transfer_stats.update(stats)
         if result is not None:
             with self._lookup_results_lock:
                 self._completed_lookups.pop(request_id, None)
@@ -1342,7 +1344,7 @@ class PrefetchController(StorageControllerInterface):
         if loaded_keys:
             if request.mode is PrefetchMode.WARM:
                 # Warm: make ready, lock nothing.
-                l1_mgr.finish_write(loaded_keys)
+                l1_mgr.finish_write(loaded_keys, from_l2=True)
             else:
                 # write-locked -> read-locked; extra_count so each TP worker
                 # gets its own read lock.
@@ -1352,7 +1354,7 @@ class PrefetchController(StorageControllerInterface):
 
         # Clean up failed keys
         if failed_keys:
-            l1_mgr.finish_write(failed_keys)
+            l1_mgr.finish_write(failed_keys, from_l2=True)
             l1_mgr.delete(failed_keys)
 
         self._event_bus.publish(
@@ -1382,6 +1384,7 @@ class PrefetchController(StorageControllerInterface):
 
         # Include keys served from L1 (read-locked when the request started)
         # so the fold sees all object groups.
+        already_l1_keys = request.l1_readlocks.popcount()
         result_bitmap = result_bitmap | request.l1_readlocks
 
         # Release read locks for any key outside the retained set (partial
@@ -1417,7 +1420,14 @@ class PrefetchController(StorageControllerInterface):
         if not request.hit_reported:
             self._report_lookup_hit(request, hit_length)
 
-        self._complete_request(request.request_id, retained)
+        self._complete_request(
+            request.request_id,
+            retained,
+            {
+                "already_l1_keys": already_l1_keys,
+                "remote_loaded_keys": len(loaded_keys),
+            },
+        )
 
     # =========================================================================
     # Unlock helpers
@@ -1453,10 +1463,17 @@ class PrefetchController(StorageControllerInterface):
     # Completion and cleanup
     # =========================================================================
 
-    def _complete_request(self, request_id: PrefetchRequestId, result: Bitmap) -> None:
+    def _complete_request(
+        self,
+        request_id: PrefetchRequestId,
+        result: Bitmap,
+        transfer_stats: dict[str, int] | None = None,
+    ) -> None:
         """Store the retained-key bitmap and remove from in-flight tracking."""
         with self._prefetch_results_lock:
             self._completed_results[request_id] = result
+            if transfer_stats is not None:
+                self._completed_transfer_stats[request_id] = transfer_stats
             # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
             self._prefetch_results_cv.notify_all()
         removed = self._in_flight_requests.pop(request_id, None)

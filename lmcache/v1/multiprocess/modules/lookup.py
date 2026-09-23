@@ -4,6 +4,7 @@
 # Standard
 from dataclasses import dataclass
 from functools import partial
+import math
 import threading
 import time
 
@@ -22,10 +23,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import (
-    HandlerSpec,
-    ThreadPoolType,
-)
+from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -328,6 +326,40 @@ class LookupModule:
                 )
             )
             return
+
+        manager = self._ctx.storage_manager
+        if manager.track_store_admission or manager.prefix_history.history_entries:
+            bytes_per_chunk = world_size * sum(
+                math.prod(shape) * dtype.itemsize
+                for desc in group_layout_descs.values()
+                for shape, dtype in zip(desc.shapes, desc.dtypes, strict=True)
+            )
+            # The token-addressed warm API supports one full-attention group.
+            # Still collect admission hints for other layouts, but no candidates.
+            tokens = list(key.token_ids)
+            if attn_desc.num_object_groups == 1 and attn_desc.num_chunks_in_sw == [-1]:
+                manager.prefix_history.observe(
+                    obj_keys,
+                    model_name,
+                    world_size,
+                    key.cache_salt,
+                    tokens,
+                    self._ctx.chunk_size,
+                    bytes_per_chunk,
+                    track_key_lengths=manager.track_store_admission,
+                )
+            elif manager.track_store_admission:
+                manager.prefix_history.observe(
+                    obj_keys,
+                    model_name,
+                    world_size,
+                    key.cache_salt,
+                    tokens,
+                    self._ctx.chunk_size,
+                    bytes_per_chunk,
+                    track_key_lengths=True,
+                    retain_prefixes=False,
+                )
 
         handle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
